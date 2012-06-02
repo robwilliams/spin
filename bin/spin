@@ -94,7 +94,6 @@ def serve(force_rspec, force_testunit, time, push_results)
       # Preload RSpec to save some time on each test run
       begin
         require 'rspec/rails'
-        require 'rspec/autorun'
 
         # Tell RSpec it's running with a tty to allow colored output
         if RSpec.respond_to?(:configure)
@@ -141,13 +140,24 @@ def serve(force_rspec, force_testunit, time, push_results)
     # it immediately.
     disconnect(conn) unless push_results
 
-    fork_and_run(files, push_results, test_framework, conn)
+    files = files.compact.uniq
+    rspec_files = files.select {|f| f =~ /spec/}
+    test_unit_files = files - rspec_files
+    
+    if rspec_files.any?
+      fork_and_run(rspec_files, push_results, :rspec, conn)
+      
+      # WAIT: We don't want the parent process handling multiple test runs at the same
+      # time because then we'd need to deal with multiple test databases, and
+      # that destroys the idea of being simple to use. So we wait(2) until the
+      # child process has finished running the test.
+      Process.wait
+   end
 
-    # WAIT: We don't want the parent process handling multiple test runs at the same
-    # time because then we'd need to deal with multiple test databases, and
-    # that destroys the idea of being simple to use. So we wait(2) until the
-    # child process has finished running the test.
-    Process.wait
+    if test_unit_files.any?
+      fork_and_run(test_unit_files, push_results, :testunit, conn)
+      Process.wait
+    end
 
     # If we are tracking time we will output it here after everything has
     # finished running
@@ -179,12 +189,13 @@ def fork_and_run(files, push_results, test_framework, conn)
     end
 
     puts
-    puts "Loading #{files.inspect}"
-
+    puts "Loading #{test_framework}: #{files.inspect}"
+    
     # Unfortunately rspec's interface isn't as simple as just requiring the
     # test file that you want to run (suddenly test/unit seems like the less
     # crazy one!).
     if test_framework == :rspec
+      require 'rspec/autorun'
       # We pretend the filepath came in as an argument and duplicate the
       # behaviour of the `rspec` binary.
       ARGV.push files
@@ -230,7 +241,9 @@ def push
     else
       file_name
     end
-  end.compact.uniq
+  end
+  
+  files_to_load = files_to_load.compact.uniq.delete_if {|f| f == ""}
 
   if root_path = rails_root
     files_to_load.map! do |file|
